@@ -1598,16 +1598,6 @@ static struct config_bool ConfigureNamesBool[] =
 		NULL, NULL, NULL
 	},
 	{
-		{"instrument_shmem_size", PGC_POSTMASTER, UNGROUPED,
-			gettext_noop("Sets the size of shmem allocated for instrumentation."),
-			NULL,
-			GUC_UNIT_KB
-		},
-		&instrument_shmem_size,
-		5120, 0, 131072,
-		NULL, NULL, NULL
-	},
-	{
 		{"array_nulls", PGC_USERSET, COMPAT_OPTIONS_PREVIOUS,
 			gettext_noop("Enable input of NULL elements in arrays."),
 			gettext_noop("When turned on, unquoted NULL in an array input "
@@ -2011,6 +2001,16 @@ static struct config_int ConfigureNamesInt[] =
 		},
 		&default_statistics_target,
 		100, 1, 10000,
+		NULL, NULL, NULL
+	},
+	{
+		{"instrument_shmem_size", PGC_POSTMASTER, UNGROUPED,
+			gettext_noop("Sets the size of shmem allocated for instrumentation."),
+			NULL,
+			GUC_UNIT_KB
+		},
+		&instrument_shmem_size,
+		5120, 0, 131072,
 		NULL, NULL, NULL
 	},
 	{
