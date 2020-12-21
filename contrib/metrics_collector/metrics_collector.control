@@ -1,0 +1,7 @@
+#https://www.postgresql.org/docs/9.4/static/extend-extensions.html
+comment = 'PostgreSQL Metrics Collector Extension'
+default_version = '1.0'
+module_pathname = '$libdir/metrics_collector'
+superuser = true
+relocatable = false
+schema=gpmetrics

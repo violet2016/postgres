@@ -13,8 +13,10 @@
 #ifndef INSTRUMENT_H
 #define INSTRUMENT_H
 
+#include "nodes/plannodes.h"
 #include "portability/instr_time.h"
-
+#include "utils/resowner.h"
+#include "storage/s_lock.h"
 
 typedef struct BufferUsage
 {
@@ -51,14 +53,14 @@ typedef struct Instrumentation
 	instr_time	starttime;		/* Start time of current iteration of node */
 	instr_time	counter;		/* Accumulated runtime for this node */
 	double		firsttuple;		/* Time for first tuple of this cycle */
-	double		tuplecount;		/* Tuples emitted so far this cycle */
+	uint64		tuplecount;		/* Tuples emitted so far this cycle */
 	BufferUsage bufusage_start; /* Buffer usage at start */
 	/* Accumulated statistics across all completed cycles: */
 	double		startup;		/* Total startup time (in seconds) */
 	double		total;			/* Total total time (in seconds) */
-	double		ntuples;		/* Total tuples produced */
-	double		ntuples2;		/* Secondary node-specific tuple counter */
-	double		nloops;			/* # of run cycles for this node */
+	uint64		ntuples;		/* Total tuples produced */
+	uint64		ntuples2;		/* Secondary node-specific tuple counter */
+	uint64		nloops;			/* # of run cycles for this node */
 	double		nfiltered1;		/* # tuples removed by scanqual or joinqual */
 	double		nfiltered2;		/* # tuples removed by "other" quals */
 	BufferUsage bufusage;		/* Total buffer usage */
@@ -81,5 +83,63 @@ extern void InstrAggNode(Instrumentation *dst, Instrumentation *add);
 extern void InstrStartParallelQuery(void);
 extern void InstrEndParallelQuery(BufferUsage *result);
 extern void InstrAccumParallelQuery(BufferUsage *result);
+
+typedef struct InstrumentationHeader
+{
+	void	   *head;
+	int			free;
+	slock_t		lock;
+} InstrumentationHeader;
+
+typedef struct InstrumentationSlot
+{
+	Instrumentation data;
+	int32		pid;			/* process id */
+	int32		tmid;			/* transaction time */
+	int32		ssid;			/* session id */
+	int32		ccnt;			/* command count */
+	int16		segid;			/* segment id */
+	int16		nid;			/* node id */
+} InstrumentationSlot;
+
+/*
+ * To guarantee the slot recycled properly,
+ * record the slot with its resource owner when picked
+ */
+typedef struct InstrumentationResownerSet
+{
+	InstrumentationSlot *slot;
+	ResourceOwner owner;
+	struct InstrumentationResownerSet *next;
+} InstrumentationResownerSet;
+
+extern InstrumentationHeader *InstrumentGlobal;
+extern Size InstrShmemNumSlots(void);
+extern Size InstrShmemSize(void);
+extern void InstrShmemInit(void);
+extern Instrumentation *GpInstrAlloc(const Plan *node, int instrument_options, Cost node_cost);
+
+/*
+ * For each free slot in shmem, fill it with specific pattern
+ * Use this pattern to detect the slot has been recycled.
+ * Also protect writes outside the allocated shmem buffer.
+ */
+#define PATTERN 0xd5
+#define LONG_PATTERN 0xd5d5d5d5d5d5d5d5
+
+/*
+ * Empty if first 8 bytes of slot filled with pattern.
+ */
+#define SlotIsEmpty(slot) ((*((int64 *)(slot)) ^ LONG_PATTERN) == 0)
+
+/*
+ * The last 8 bytes of slot points to next free slot.
+ */
+#define GetInstrumentNext(slot) (*((InstrumentationSlot **)((slot) + 1) - 1))
+
+/*
+ * Limit the maximum scan node's instr per query in shmem
+ */
+#define MAX_SCAN_ON_SHMEM 300
 
 #endif							/* INSTRUMENT_H */

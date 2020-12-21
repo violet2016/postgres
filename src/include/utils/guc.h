@@ -246,6 +246,8 @@ extern bool log_statement_stats;
 extern bool log_btree_build_stats;
 
 extern PGDLLIMPORT bool check_function_bodies;
+extern bool enable_query_metrics;
+extern int instrument_shmem_size;
 extern bool session_auth_is_superuser;
 
 extern int	log_min_error_statement;

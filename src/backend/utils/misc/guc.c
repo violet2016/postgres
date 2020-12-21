@@ -499,6 +499,8 @@ char	   *event_source;
 bool		row_security;
 bool		check_function_bodies = true;
 
+bool		enable_query_metrics = false;
+int			instrument_shmem_size = 5120;
 /*
  * This GUC exists solely for backward compatibility, check its definition for
  * details.
@@ -1584,6 +1586,25 @@ static struct config_bool ConfigureNamesBool[] =
 		},
 		&check_function_bodies,
 		true,
+		NULL, NULL, NULL
+	},
+	{
+		{"enable_query_metrics", PGC_USERSET, CLIENT_CONN_STATEMENT,
+			gettext_noop("When enabled, will emit query running metrics."),
+			NULL
+		},
+		&enable_query_metrics,
+		false,
+		NULL, NULL, NULL
+	},
+	{
+		{"instrument_shmem_size", PGC_POSTMASTER, UNGROUPED,
+			gettext_noop("Sets the size of shmem allocated for instrumentation."),
+			NULL,
+			GUC_UNIT_KB
+		},
+		&instrument_shmem_size,
+		5120, 0, 131072,
 		NULL, NULL, NULL
 	},
 	{

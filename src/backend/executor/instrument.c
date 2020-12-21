@@ -12,9 +12,10 @@
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
-
+#include "utils/guc.h"
 #include <unistd.h>
-
+#include "miscadmin.h"
+#include "storage/spin.h"
 #include "executor/instrument.h"
 
 BufferUsage pgBufferUsage;
@@ -24,7 +25,16 @@ static void BufferUsageAdd(BufferUsage *dst, const BufferUsage *add);
 static void BufferUsageAccumDiff(BufferUsage *dst,
 								 const BufferUsage *add, const BufferUsage *sub);
 
+static bool shouldPickInstrInShmem(NodeTag tag);
+static Instrumentation *pickInstrFromShmem(const Plan *plan, int instrument_options);
+static void instrShmemRecycleCallback(ResourceReleasePhase phase, bool isCommit,
+						  bool isTopLevel, void *arg);
 
+InstrumentationHeader *InstrumentGlobal = NULL;
+static int  scanNodeCounter = 0;
+static int  shmemNumSlots = -1;
+static bool instrumentResownerCallbackRegistered = false;
+static InstrumentationResownerSet *slotsOccupied = NULL;
 /* Allocate new instrumentation structure(s) */
 Instrumentation *
 InstrAlloc(int n, int instrument_options)
@@ -222,4 +232,250 @@ BufferUsageAccumDiff(BufferUsage *dst,
 						  add->blk_read_time, sub->blk_read_time);
 	INSTR_TIME_ACCUM_DIFF(dst->blk_write_time,
 						  add->blk_write_time, sub->blk_write_time);
+}
+
+/* Calculate number slots from gp_instrument_shmem_size */
+Size
+InstrShmemNumSlots(void)
+{
+	if (shmemNumSlots < 0) {
+		shmemNumSlots = (int)(instrument_shmem_size * 1024 - sizeof(InstrumentationHeader)) / sizeof(InstrumentationSlot);
+		shmemNumSlots = (shmemNumSlots < 0) ? 0 : shmemNumSlots;
+	}
+	return shmemNumSlots;
+}
+
+/* Allocate a header and an array of Instrumentation slots */
+Size
+InstrShmemSize(void)
+{
+	Size		size = 0;
+	Size		number_slots;
+// FIXME:
+	/* If start in utility mode, disallow Instrumentation on Shmem */
+	/*if (Gp_role == GP_ROLE_UTILITY)
+		return size;
+	*/
+	/* If GUCs not enabled, bypass Instrumentation on Shmem */
+	if (!enable_query_metrics || instrument_shmem_size <= 0)
+		return size;
+
+	number_slots = InstrShmemNumSlots();
+
+	if (number_slots <= 0)
+		return size;
+
+	size = add_size(size, sizeof(InstrumentationHeader));
+	size = add_size(size, mul_size(number_slots, sizeof(InstrumentationSlot)));
+
+	return size;
+}
+
+/* Initialize Shmem space to construct a free list of Instrumentation */
+void
+InstrShmemInit(void)
+{
+	Size		size, number_slots;
+	InstrumentationSlot *slot;
+	InstrumentationHeader *header;
+	int			i;
+
+	number_slots = InstrShmemNumSlots();
+	size = InstrShmemSize();
+	if (size <= 0)
+		return;
+
+	/* Allocate space from Shmem */
+	header = (InstrumentationHeader *) ShmemAlloc(size);
+	if (!header)
+		ereport(FATAL, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("out of shared memory")));
+
+	/* Initialize header and all slots to zeroes, then modify as needed */
+	memset(header, PATTERN, size);
+
+	/* pointer to the first Instrumentation slot */
+	slot = (InstrumentationSlot *) (header + 1);
+
+	/* header points to the first slot */
+	header->head = slot;
+	header->free = number_slots;
+	SpinLockInit(&header->lock);
+
+	/* Each slot points to next one to construct the free list */
+	for (i = 0; i < number_slots - 1; i++)
+		GetInstrumentNext(&slot[i]) = &slot[i + 1];
+	GetInstrumentNext(&slot[i]) = NULL;
+
+	/* Finished init the free list */
+	InstrumentGlobal = header;
+
+	if (NULL != InstrumentGlobal && !instrumentResownerCallbackRegistered)
+	{
+		/*
+		 * Register a callback function in ResourceOwner to recycle Instr in
+		 * shmem
+		 */
+		RegisterResourceReleaseCallback(instrShmemRecycleCallback, NULL);
+		instrumentResownerCallbackRegistered = true;
+	}
+}
+
+/*
+ * This is GPDB replacement of InstrAlloc for ExecInitNode to get an
+ * Instrumentation struct
+ *
+ * Use shmem if gp_enable_query_metrics is on and there is free slot.
+ * Otherwise use local memory.
+ */
+Instrumentation *
+GpInstrAlloc(const Plan *node, int instrument_options, Cost node_cost)
+{
+	Instrumentation *instr = NULL;
+
+	if (node_cost >= 50.0 && shouldPickInstrInShmem(nodeTag(node)))
+		instr = pickInstrFromShmem(node, instrument_options);
+
+	if (instr == NULL)
+		instr = InstrAlloc(1, instrument_options);
+
+	return instr;
+}
+
+static bool
+shouldPickInstrInShmem(NodeTag tag)
+{
+	/* For utility mode, don't alloc in shmem */
+	// FIXME: utility
+	/*
+	if (Gp_role == GP_ROLE_UTILITY)
+		return false;
+	*/
+	if (!enable_query_metrics || NULL == InstrumentGlobal)
+		return false;
+
+	switch (tag)
+	{
+		case T_SeqScan:
+
+			/*
+			 * If table has many partitions, Postgres planner will generate a
+			 * plan with many SCAN nodes under a APPEND node. If the number of
+			 * partitions are too many, this plan will occupy too many slots.
+			 * Here is a limitation on number of shmem slots used by scan
+			 * nodes for each backend. Instruments exceeding the limitation
+			 * are allocated local memory.
+			 */
+			if (scanNodeCounter >= MAX_SCAN_ON_SHMEM)
+				return false;
+			scanNodeCounter++;
+			break;
+		default:
+			break;
+	}
+	return true;
+}
+
+/*
+ * Pick an Instrumentation from free slots in Shmem.
+ * Return NULL when no more free slots in Shmem.
+ *
+ * Instrumentation returned by this function requires to be
+ * recycled back to the free slots list when the query is done.
+ * See instrShmemRecycleCallback for recycling behavior
+ */
+static Instrumentation *
+pickInstrFromShmem(const Plan *plan, int instrument_options)
+{
+	Instrumentation *instr = NULL;
+	InstrumentationSlot *slot = NULL;
+	InstrumentationResownerSet *item;
+
+	/* Lock to protect write to header */
+	SpinLockAcquire(&InstrumentGlobal->lock);
+
+	/* Pick the first free slot */
+	slot = InstrumentGlobal->head;
+	if (NULL != slot && SlotIsEmpty(slot))
+	{
+		/* Header points to the next free slot */
+		InstrumentGlobal->head = GetInstrumentNext(slot);
+		InstrumentGlobal->free--;
+	}
+
+	SpinLockRelease(&InstrumentGlobal->lock);
+
+	if (NULL != slot && SlotIsEmpty(slot))
+	{
+		memset(slot, 0x00, sizeof(InstrumentationSlot));
+		/* initialize the picked slot */
+		instr = &(slot->data);
+		slot->segid = -1;
+		slot->pid = MyProcPid;
+		//gp_gettmid(&(slot->tmid));
+		// FIXME: session id
+		//slot->ssid = session_id;
+		//FIXME: ccnt
+		slot->ccnt = 0;
+		slot->nid = (int16) plan->plan_node_id;
+		// FIXME:
+		//MemoryContext contextSave = MemoryContextSwitchTo(TopMemoryContext);
+
+		item = (InstrumentationResownerSet *) palloc0(sizeof(InstrumentationResownerSet));
+		item->owner = CurrentResourceOwner;
+		item->slot = slot;
+		item->next = slotsOccupied;
+		slotsOccupied = item;
+		//MemoryContextSwitchTo(contextSave);
+	}
+
+	if (NULL != instr && instrument_options & INSTRUMENT_TIMER)
+	{
+		instr->need_timer = (instrument_options & INSTRUMENT_TIMER) != 0;
+	}
+
+	return instr;
+}
+
+/*
+ * Recycle instrumentation in shmem
+ */
+static void
+instrShmemRecycleCallback(ResourceReleasePhase phase, bool isCommit, bool isTopLevel, void *arg)
+{
+	InstrumentationResownerSet *next;
+	InstrumentationResownerSet *curr;
+	InstrumentationSlot *slot;
+
+	if (NULL == InstrumentGlobal || NULL == slotsOccupied || phase != RESOURCE_RELEASE_AFTER_LOCKS)
+		return;
+
+	/* Reset scanNodeCounter */
+	scanNodeCounter = 0;
+
+	next = slotsOccupied;
+	slotsOccupied = NULL;
+	SpinLockAcquire(&InstrumentGlobal->lock);
+	while (next)
+	{
+		curr = next;
+		next = curr->next;
+		if (curr->owner != CurrentResourceOwner)
+		{
+			curr->next = slotsOccupied;
+			slotsOccupied = curr;
+			continue;
+		}
+
+		slot = curr->slot;
+
+		/* Recycle Instrumentation slot back to the free list */
+		memset(slot, PATTERN, sizeof(InstrumentationSlot));
+
+		GetInstrumentNext(slot) = InstrumentGlobal->head;
+		InstrumentGlobal->head = slot;
+		InstrumentGlobal->free++;
+
+		pfree(curr);
+	}
+	SpinLockRelease(&InstrumentGlobal->lock);
 }
