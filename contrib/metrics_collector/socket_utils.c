@@ -329,7 +329,8 @@ send_single_packet(void *p, size_t n)
 			}
 			else
 			{
-				elog(LOG, "Metrics collector: socket_init failed %d", errno);
+				int err = errno;
+				elog(LOG, "Metrics collector: socket_init failed %d", err);
 #ifdef PACKET_TRACE
 				packet_trace(p);
 #endif // PACKET_TRACE
