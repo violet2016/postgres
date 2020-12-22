@@ -131,7 +131,7 @@
 #include "utils/timeout.h"
 #include "utils/timestamp.h"
 #include "utils/varlena.h"
-
+#include "utils/metrics_utils.h"
 #ifdef EXEC_BACKEND
 #include "storage/spin.h"
 #endif
@@ -437,7 +437,7 @@ static pid_t StartChildProcess(AuxProcType type);
 static void StartAutovacuumWorker(void);
 static void MaybeStartWalReceiver(void);
 static void InitPostmasterDeathWatchHandle(void);
-
+query_info_collect_hook_type query_info_collect_hook = NULL;
 /*
  * Archiver is allowed to start up at the current postmaster state?
  *

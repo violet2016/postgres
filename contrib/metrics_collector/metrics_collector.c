@@ -19,6 +19,7 @@
 #include "utils.h"
 #include "executor/instrument.h"
 #include "storage/ipc.h"
+#include "postmaster/bgworker.h"
 
 PG_MODULE_MAGIC;
 
@@ -579,4 +580,424 @@ _PG_fini()
 	}
 	queryInfo_hook_finishup();
 	flushBuffContext_finishup();
+}
+
+
+PG_FUNCTION_INFO_V1(metrics_collector_start_worker);
+
+#define MC_LOOP_SLEEP_MS 100L
+#define START_MC_BGWORKER "select gpmetrics.metrics_collector_start_worker();"
+
+extern bool UtilityQuery;
+
+void
+EmitUtilityQueryInfo(Node *parsetree,
+			const char *queryString,
+			//ProcessUtilityContext context,
+			ParamListInfo params,
+			DestReceiver *dest,
+			char *completionTag);
+static bool
+is_inner_select_query(Node *parsetree);
+
+void
+_PG_init(void);
+
+Datum
+metrics_collector_start_worker(PG_FUNCTION_ARGS);
+static void
+metrics_collector_start_worker_internal(bool isDynamic);
+static void
+metrics_collector_worker_main(Datum arg);
+static void
+metrics_collector_worker_static_main(Datum arg);
+static void
+metrics_collector_shmem_startup(void);
+//static void
+//mc_object_access_hook(ObjectAccessType access, Oid classId, Oid objectId, int subId, void *arg);
+static void
+init_mc_shmem(void);
+
+// exactly the same as BackgroundWorkerHandle
+typedef struct MetricsCollectorHandler
+{
+	int		slot;
+	uint64		generation;
+} MetricsCollectorHandler;
+
+static MetricsCollectorHandler *worker_handler;
+static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
+
+static LWLock *mc_bg_handler_lock = NULL;
+//static object_access_hook_type next_object_access_hook;
+//static ProcessUtility_hook_type next_process_utility_hook;
+
+/* flags set by signal handlers */
+static volatile sig_atomic_t got_sigterm = false;
+
+/*
+ * Signal handler for SIGTERM
+ * Set a flag to let the main loop to terminate, and set our latch to wake
+ * it up.
+ */
+static void
+mc_worker_sigterm(SIGNAL_ARGS)
+{
+	int			save_errno = errno;
+
+	got_sigterm = true;
+	if (MyProc)
+		SetLatch(&MyProc->procLatch);
+
+	errno = save_errno;
+}
+
+static void
+cleanUtilityFlag(ResourceReleasePhase phase, bool isCommit, bool isTopLevel, void *arg)
+{
+	if (phase != RESOURCE_RELEASE_AFTER_LOCKS)
+		return;
+
+	UtilityQuery = false;
+}
+
+/*
+ * Entrypoint of this module.
+ */
+void
+_PG_init(void)
+{
+    /*
+     * Skip loading hook function when GP in utility mode
+     */
+	init_guc();
+    /*
+     * gp_enable_query_metrics is a cluster level GUC
+     * To enable metrics_collector.so, set gp_enable_query_metrics to on
+     */
+	if (enable_query_metrics)
+	{
+		query_info_collect_hook = &EmitQueryInfo;
+		ereport(LOG, (errmsg("Metrics collector: query info collect hook initialized")));
+		//FIXME:
+		//next_process_utility_hook = ProcessUtility_hook;
+		//ProcessUtility_hook = &EmitUtilityQueryInfo;
+		ereport(LOG, (errmsg("Metrics collector: utility query info collect hook initialized")));
+		RegisterResourceReleaseCallback(cleanUtilityFlag, NULL);
+
+		/* Add mc_object_access_hook to handle drop extension event.*/
+		//FIXME:
+		//next_object_access_hook = object_access_hook;
+		//object_access_hook = mc_object_access_hook;
+
+		// Request shared memory
+		init_mc_shmem();
+		init_packet_buff_shmem();
+
+
+			// prepare metrics collector error hooks
+		init_mc_error_data_hook();
+
+		// On master's QD only, prepare directories for query text file
+		// Skip this for utility connection on segment
+	
+			/*
+				* Start a static bgworker when gpdb starts
+				* 1. Create a dynamic bgworker to collect cluster metrics, If metrics collector extension already exists.
+				* 2. Do nothing if metrics collector extension does not exist.
+				*/
+		metrics_collector_start_worker_internal(false);
+
+		char queryTextFilePath[MAXPGPATH];
+		struct stat st;
+
+		if (stat(DIR_GPCC_METRICS, &st) < 0 && mkdir(DIR_GPCC_METRICS, S_IRWXU))
+			ereport(LOG, (errmsg("Metrics collector: failed to create gpmetrics directory %s", DIR_GPCC_METRICS)));
+
+		join_path_components(queryTextFilePath, DIR_GPCC_METRICS, DIR_QUERY_TEXT);
+		canonicalize_path(queryTextFilePath);
+
+		if (stat(queryTextFilePath, &st) < 0 && mkdir(queryTextFilePath, S_IRWXU))
+			ereport(LOG, (errmsg("Metrics collector: failed to create query_text directory %s", queryTextFilePath)));
+			
+	}
+}
+
+// Request shared memory slot and a LWLock
+static void 
+init_mc_shmem(void)
+{
+	//RequestAddinLWLocks(1);
+	RequestAddinShmemSpace(sizeof(MetricsCollectorHandler));
+	prev_shmem_startup_hook = shmem_startup_hook;
+	shmem_startup_hook = metrics_collector_shmem_startup;
+}
+
+// Initialize MetricsCollectorHandler struct for bgworker in shared memory
+static void 
+metrics_collector_shmem_startup(void)
+{
+	bool		found;
+
+	if (prev_shmem_startup_hook)
+		(*prev_shmem_startup_hook)();
+	
+
+	//mc_bg_handler_lock = LWLockAssign();
+	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+	
+	worker_handler = ShmemInitStruct("mc_bgworker_handler",
+							sizeof(MetricsCollectorHandler),
+							&found);
+	if (!found)
+		memset((void*)worker_handler, 0, sizeof(MetricsCollectorHandler));
+
+	LWLockRelease(AddinShmemInitLock);
+}
+
+// Main function for metrics collector launcher process
+static void
+metrics_collector_worker_static_main(Datum arg)
+{
+	BackgroundWorkerUnblockSignals();
+	
+	BackgroundWorkerInitializeConnection("gpperfmon", NULL, 0);
+	
+	StartTransactionCommand();
+	// if extension already exists, start a dynamic bgworker on master and all segments
+	// if not, do nothing and exit
+	if(get_extension_oid("metrics_collector", true) != InvalidOid)
+	{
+		ereport(LOG, (errmsg("Metrics collector: try to start background worker because extension exists.")));
+		if(enable_query_metrics)
+		{
+			metrics_collector_start_worker_internal(true);
+			dispatch_udf_to_segDBs(START_MC_BGWORKER);
+		}
+		else
+			ereport(LOG, (errmsg("Metrics collector: skip start background worker because gp_enable_query_metrics is off")));
+	}
+	CommitTransactionCommand();
+	exit(0);
+}
+
+// Main function for metrics collector worker process
+static void
+metrics_collector_worker_main(Datum arg)
+{
+	int rc;
+	pqsignal(SIGTERM, mc_worker_sigterm);
+
+	/* We're now ready to receive signals */
+	BackgroundWorkerUnblockSignals();
+	
+	/* Create and initialize metrics_packet */
+	InitNodeInstrPkt(&nodeinfopkt);
+	InitLockInfoPkt(&lockinfopkt);
+	InitStatActivityPkt(&activitypkt);
+	InitSpillFilePkt(&spillfilepkt);
+
+	metricsCollectorContext = AllocSetContextCreate(TopMemoryContext,
+	                                         "MetricsCollectorMemCtxt",
+	                                         ALLOCSET_DEFAULT_INITSIZE,
+	                                         ALLOCSET_DEFAULT_INITSIZE,
+	                                         ALLOCSET_DEFAULT_MAXSIZE);
+
+	ereport(LOG, (errmsg("Metrics collector: background worker starts")));
+	
+	while(!got_sigterm)
+	{
+		CHECK_FOR_INTERRUPTS();
+
+		/* no need to live on if postmaster has died */
+		if (!PostmasterIsAlive())
+			exit(1);
+
+		MetricsCollectorLoopFunc();
+
+		/* Sleep a while. */
+		//FIXME: sleep time
+		rc = WaitLatch(&MyProc->procLatch,
+				WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
+				MC_LOOP_SLEEP_MS, WAIT_EVENT_PG_SLEEP);
+		ResetLatch(&MyProc->procLatch);
+
+		/* emergency bailout if postmaster has died */
+		if (rc & WL_POSTMASTER_DEATH)
+			proc_exit(1);
+	}	
+	/* gp will restart it if exit code is not 0. */
+	proc_exit(1);
+}
+
+/*
+ * Function starting metrics collector worker
+ */
+Datum
+metrics_collector_start_worker(PG_FUNCTION_ARGS)
+{
+	if (!enable_query_metrics)
+		ereport(ERROR, 
+				(errmsg("Metrics collector: failed to create metrics_collector extension"),
+				 errhint("Make sure gp_enable_query_metrics GUC turned on")));
+
+	metrics_collector_start_worker_internal(true);
+
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * Main function for start a static or dynamic background worker
+ */
+static void
+metrics_collector_start_worker_internal(bool isDynamic)
+{
+	BackgroundWorker worker;
+	BackgroundWorkerHandle *handle;
+	MemoryContext old_ctx;
+	pid_t pid;
+	BgwHandleStatus status = BGWH_STOPPED;
+
+	memset(&worker, 0, sizeof(BackgroundWorker));
+	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+
+	if (isDynamic)
+	{
+		worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
+		worker.bgw_restart_time = BGW_DEFAULT_RESTART_INTERVAL;
+		snprintf(worker.bgw_name, sizeof(worker.bgw_name), "%s", "metrics collector");
+		sprintf(worker.bgw_function_name, "metrics_collector_worker_main");
+		/* set bgw_notify_pid so that we can use WaitForBackgroundWorkerStartup */
+		worker.bgw_notify_pid = MyProcPid;
+		worker.bgw_main_arg = (Datum) 0;
+
+		old_ctx = MemoryContextSwitchTo(TopMemoryContext);
+		if (!RegisterDynamicBackgroundWorker(&worker, &handle))
+			ereport(ERROR, (errmsg("Metrics collector: register dynamic background worker failed")));
+
+		MemoryContextSwitchTo(old_ctx);
+
+		status = WaitForBackgroundWorkerStartup(handle, &pid);
+		if (status == BGWH_STOPPED)
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
+					errmsg("Metrics collector: could not start background process"),
+					errhint("More details may be available in the server log.")));
+		if (status == BGWH_POSTMASTER_DIED)
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
+					errmsg("Metrics collector: cannot start background processes without postmaster"),
+					errhint("Kill all remaining database processes and restart the database.")));
+
+		Assert(status == BGWH_STARTED);
+
+		LWLockAcquire(mc_bg_handler_lock, LW_EXCLUSIVE);
+		memcpy(worker_handler, handle, sizeof(MetricsCollectorHandler));
+		LWLockRelease(mc_bg_handler_lock);
+	}
+	else
+	{
+		worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
+			BGWORKER_BACKEND_DATABASE_CONNECTION;
+		worker.bgw_restart_time = BGW_NEVER_RESTART;
+		snprintf(worker.bgw_name, sizeof(worker.bgw_name), "%s", "metrics collector launcher");
+		sprintf(worker.bgw_function_name, "metrics_collector_worker_static_main");
+		RegisterBackgroundWorker(&worker);
+	}
+}
+
+/*
+ * mc_object_access_hook is to stop bgworker when drop extension
+ */
+/*FIXME:
+static void
+mc_object_access_hook(ObjectAccessType access, Oid classId,
+			Oid objectId, int subId, void *arg)
+{
+	Oid oid;
+
+	if (next_object_access_hook)
+		(*next_object_access_hook)(access, classId, objectId, subId, arg);
+
+	if (access != OAT_DROP || classId != ExtensionRelationId)
+		return;
+
+	oid = get_extension_oid("metrics_collector", true);
+	if (oid == objectId)
+	{
+		ereport(LOG, (errmsg("Metrics collector: terminate bgworker")));
+		LWLockAcquire(mc_bg_handler_lock, LW_EXCLUSIVE);
+		TerminateBackgroundWorker((BackgroundWorkerHandle *)worker_handler);
+		memset(worker_handler, 0x7f, sizeof(MetricsCollectorHandler));
+		LWLockRelease(mc_bg_handler_lock);
+	}
+}*/
+
+/*
+ * If ProcessUtility_hook is already set by another user, call it.
+ * Otherwise, call standard_ProcessUtility.
+ */
+// FIXME:
+/*
+void
+AdaptorProcessUtility(Node *parsetree,
+			const char *queryString,
+			ProcessUtilityContext context,
+			ParamListInfo params,
+			DestReceiver *dest,
+			char *completionTag)
+{
+	if (next_process_utility_hook)
+		(*next_process_utility_hook)(parsetree, queryString,
+								context, params,
+								dest, completionTag);
+	else
+		standard_ProcessUtility(parsetree, queryString,
+								context, params,
+								dest, completionTag);
+}*/
+
+/*
+ * Utility hook function to emit utility query information.
+ * send METRICS_QUERY_SUBMIT&METRICS_QUERY_START before standard_ProcessUtility,
+ * send METRICS_QUERY_DONE after it.
+ */
+//FIXME: EmitUtilityQueryInfo
+
+/*
+ * Emit query guc, do this when status is METRICS_QUERY_SUBMIT
+ */
+// FIXME: emit_query_guc
+
+/*
+ * Judge whether the query will increase gp_command_count more than once
+ * by executing select in it.
+ * For example:
+ *   COPY (SELECT * FROM ... ) TO ''
+ *   CREATE TABLE AS SELECT * FROM ...
+ * For these query, skip ProcessUtility_hook and catch them by
+ * query_info_collect_hook. Otherwise, frontend will see a same query
+ * which ccnt is largger from Activity.
+ */
+static bool
+is_inner_select_query(Node *parsetree)
+{
+	if (parsetree == NULL)
+	{
+		return false;
+	}
+	else if (parsetree->type == T_CopyStmt)
+	{
+		List *next = (List*)((List*)parsetree)->tail;
+		if (next != NULL && next->type == T_SelectStmt)
+		{
+			return true;
+		}
+	}
+	else if (parsetree->type == T_CreateTableAsStmt)
+	{
+		return true;
+	}
+	return false;
 }
