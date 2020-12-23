@@ -867,6 +867,7 @@ metrics_collector_start_worker_internal(bool isDynamic)
 		worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
 		worker.bgw_restart_time = BGW_DEFAULT_RESTART_INTERVAL;
 		snprintf(worker.bgw_name, sizeof(worker.bgw_name), "%s", "metrics collector");
+		snprintf(worker.bgw_library_name, sizeof(worker.bgw_library_name), "%s", "metrics_collector");
 		sprintf(worker.bgw_function_name, "metrics_collector_worker_main");
 		/* set bgw_notify_pid so that we can use WaitForBackgroundWorkerStartup */
 		worker.bgw_notify_pid = MyProcPid;
@@ -902,6 +903,7 @@ metrics_collector_start_worker_internal(bool isDynamic)
 			BGWORKER_BACKEND_DATABASE_CONNECTION;
 		worker.bgw_restart_time = BGW_NEVER_RESTART;
 		snprintf(worker.bgw_name, sizeof(worker.bgw_name), "%s", "metrics collector launcher");
+		snprintf(worker.bgw_library_name, sizeof(worker.bgw_library_name), "%s", "metrics_collector");
 		sprintf(worker.bgw_function_name, "metrics_collector_worker_static_main");
 		RegisterBackgroundWorker(&worker);
 	}
