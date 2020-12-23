@@ -324,7 +324,7 @@ InstrShmemInit(void)
  * This is GPDB replacement of InstrAlloc for ExecInitNode to get an
  * Instrumentation struct
  *
- * Use shmem if gp_enable_query_metrics is on and there is free slot.
+ * Use shmem if enable_query_metrics is on and there is free slot.
  * Otherwise use local memory.
  */
 Instrumentation *

@@ -772,10 +772,10 @@ metrics_collector_worker_static_main(Datum arg)
 		if(enable_query_metrics)
 		{
 			metrics_collector_start_worker_internal(true);
-			dispatch_udf_to_segDBs(START_MC_BGWORKER);
+			//dispatch_udf_to_segDBs(START_MC_BGWORKER);
 		}
 		else
-			ereport(LOG, (errmsg("Metrics collector: skip start background worker because gp_enable_query_metrics is off")));
+			ereport(LOG, (errmsg("Metrics collector: skip start background worker because enable_query_metrics is off")));
 	}
 	CommitTransactionCommand();
 	exit(0);
@@ -839,7 +839,7 @@ metrics_collector_start_worker(PG_FUNCTION_ARGS)
 	if (!enable_query_metrics)
 		ereport(ERROR, 
 				(errmsg("Metrics collector: failed to create metrics_collector extension"),
-				 errhint("Make sure gp_enable_query_metrics GUC turned on")));
+				 errhint("Make sure enable_query_metrics GUC turned on")));
 
 	metrics_collector_start_worker_internal(true);
 

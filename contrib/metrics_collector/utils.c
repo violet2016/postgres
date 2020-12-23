@@ -227,13 +227,12 @@ init_guc(void)
 				 PGC_USERSET,
 				 0,
 				 NULL, NULL, NULL);
-
 	DefineCustomIntVariable("gpcc.query_metrics_port",
 				 gettext_noop("Sets the port number of sending query metrics."),
 				 NULL,
 				 &gpcc_query_metrics_port,
+				 9898,
 				 1024, 65535,
-				 false,
 				 PGC_USERSET,
 				 0,
 				 NULL, NULL, NULL);
@@ -242,8 +241,8 @@ init_guc(void)
 				 gettext_noop("Metrics Collector packet version."),
 				 NULL,
 				 &metrics_collector_pkt_version,
+				 METRICS_PACKET_VERSION,
 				 0, 65535,
-				 false,
 				 PGC_INTERNAL,
 				 0,
 				 NULL, NULL, NULL);
