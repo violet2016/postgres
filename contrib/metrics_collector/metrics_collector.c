@@ -607,9 +607,9 @@ Datum
 metrics_collector_start_worker(PG_FUNCTION_ARGS);
 static void
 metrics_collector_start_worker_internal(bool isDynamic);
-static void
+void
 metrics_collector_worker_main(Datum arg);
-static void
+void
 metrics_collector_worker_static_main(Datum arg);
 static void
 metrics_collector_shmem_startup(void);
@@ -742,8 +742,7 @@ metrics_collector_shmem_startup(void)
 	if (prev_shmem_startup_hook)
 		(*prev_shmem_startup_hook)();
 	
-
-	//mc_bg_handler_lock = LWLockAssign();
+	LWLockInitialize(mc_bg_handler_lock, LWLockNewTrancheId());
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 	
 	worker_handler = ShmemInitStruct("mc_bgworker_handler",
@@ -756,7 +755,7 @@ metrics_collector_shmem_startup(void)
 }
 
 // Main function for metrics collector launcher process
-static void
+void
 metrics_collector_worker_static_main(Datum arg)
 {
 	BackgroundWorkerUnblockSignals();
@@ -782,7 +781,7 @@ metrics_collector_worker_static_main(Datum arg)
 }
 
 // Main function for metrics collector worker process
-static void
+void
 metrics_collector_worker_main(Datum arg)
 {
 	int rc;
@@ -810,7 +809,7 @@ metrics_collector_worker_main(Datum arg)
 		CHECK_FOR_INTERRUPTS();
 
 		/* no need to live on if postmaster has died */
-		if (!PostmasterIsAlive())
+		if (!PostmasterIsAliveInternal())
 			exit(1);
 
 		MetricsCollectorLoopFunc();
