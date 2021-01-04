@@ -1023,6 +1023,7 @@ typedef struct PlanState
 	bool		outeropsset;
 	bool		inneropsset;
 	bool		resultopsset;
+	bool		fHadSentNodeStart;
 } PlanState;
 
 /* ----------------

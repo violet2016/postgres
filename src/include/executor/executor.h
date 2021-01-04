@@ -18,7 +18,7 @@
 #include "nodes/lockoptions.h"
 #include "nodes/parsenodes.h"
 #include "utils/memutils.h"
-
+#include "utils/metrics_utils.h"
 
 /*
  * The "eflags" argument to ExecutorStart and the various ExecInitNode
@@ -238,7 +238,13 @@ ExecProcNode(PlanState *node)
 {
 	if (node->chgParam != NULL) /* something changed? */
 		ExecReScan(node);		/* let ReScan handle this */
-
+	if(!node->fHadSentNodeStart)
+	{
+		/* GPDB hook for collecting query info */
+		if (query_info_collect_hook)
+			(*query_info_collect_hook)(METRICS_PLAN_NODE_EXECUTING, node);
+		node->fHadSentNodeStart = true;
+	}
 	return node->ExecProcNode(node);
 }
 #endif

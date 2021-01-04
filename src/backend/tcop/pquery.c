@@ -26,7 +26,7 @@
 #include "tcop/utility.h"
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
-
+#include "utils/metrics_utils.h"
 
 /*
  * ActivePortal is the currently executing Portal (the most closely nested,
@@ -149,7 +149,8 @@ ProcessQuery(PlannedStmt *plan,
 	queryDesc = CreateQueryDesc(plan, sourceText,
 								GetActiveSnapshot(), InvalidSnapshot,
 								dest, params, queryEnv, 0);
-
+	if (query_info_collect_hook)
+		(*query_info_collect_hook)(METRICS_QUERY_SUBMIT, queryDesc);
 	/*
 	 * Call ExecutorStart to prepare the plan for execution
 	 */
@@ -511,7 +512,8 @@ PortalStart(Portal portal, ParamListInfo params,
 					myeflags = eflags | EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD;
 				else
 					myeflags = eflags;
-
+				if (query_info_collect_hook)
+					(*query_info_collect_hook)(METRICS_QUERY_SUBMIT, queryDesc);
 				/*
 				 * Call ExecutorStart to prepare the plan for execution
 				 */

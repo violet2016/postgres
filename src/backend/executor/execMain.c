@@ -176,7 +176,8 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	if ((XactReadOnly || IsInParallelMode()) &&
 		!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
 		ExecCheckXactReadOnly(queryDesc->plannedstmt);
-
+	if (query_info_collect_hook)
+		(*query_info_collect_hook)(METRICS_QUERY_START, queryDesc);
 	/*
 	 * Build EState, switch into per-query memory context for startup.
 	 */
@@ -487,7 +488,9 @@ standard_ExecutorEnd(QueryDesc *queryDesc)
 	 */
 	Assert(estate->es_finished ||
 		   (estate->es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY));
-
+	// FIXME: inner query
+	if (query_info_collect_hook)
+		(*query_info_collect_hook)(METRICS_QUERY_DONE, queryDesc);
 	/*
 	 * Switch into per-query memory context to run ExecEndPlan
 	 */

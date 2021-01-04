@@ -628,7 +628,7 @@ typedef struct MetricsCollectorHandler
 static MetricsCollectorHandler *worker_handler;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
-static LWLock *mc_bg_handler_lock = NULL;
+static LWLock mc_bg_handler_lock;
 //static object_access_hook_type next_object_access_hook;
 //static ProcessUtility_hook_type next_process_utility_hook;
 
@@ -742,7 +742,7 @@ metrics_collector_shmem_startup(void)
 	if (prev_shmem_startup_hook)
 		(*prev_shmem_startup_hook)();
 	
-	LWLockInitialize(mc_bg_handler_lock, LWLockNewTrancheId());
+	LWLockInitialize(&mc_bg_handler_lock, LWLockNewTrancheId());
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 	
 	worker_handler = ShmemInitStruct("mc_bgworker_handler",
@@ -892,9 +892,9 @@ metrics_collector_start_worker_internal(bool isDynamic)
 
 		Assert(status == BGWH_STARTED);
 
-		LWLockAcquire(mc_bg_handler_lock, LW_EXCLUSIVE);
+		LWLockAcquire(&mc_bg_handler_lock, LW_EXCLUSIVE);
 		memcpy(worker_handler, handle, sizeof(MetricsCollectorHandler));
-		LWLockRelease(mc_bg_handler_lock);
+		LWLockRelease(&mc_bg_handler_lock);
 	}
 	else
 	{
@@ -928,10 +928,10 @@ mc_object_access_hook(ObjectAccessType access, Oid classId,
 	if (oid == objectId)
 	{
 		ereport(LOG, (errmsg("Metrics collector: terminate bgworker")));
-		LWLockAcquire(mc_bg_handler_lock, LW_EXCLUSIVE);
+		LWLockAcquire(&mc_bg_handler_lock, LW_EXCLUSIVE);
 		TerminateBackgroundWorker((BackgroundWorkerHandle *)worker_handler);
 		memset(worker_handler, 0x7f, sizeof(MetricsCollectorHandler));
-		LWLockRelease(mc_bg_handler_lock);
+		LWLockRelease(&mc_bg_handler_lock);
 	}
 }*/
 
