@@ -102,8 +102,9 @@ should_skip_process()
 		return true;
 
 	// do nothing if agent not start
-	if (should_keep_silence())
-		return true;
+// FIXME: remove comment
+//	if (should_keep_silence())
+//		return true;
 
 	if (session_id == 0)
 	{
@@ -787,23 +788,25 @@ emit_query_info(QueryDesc *qd, QueryMetricsStatus status)
 	 */
 	if (status == METRICS_QUERY_SUBMIT)
 	{
-		const char *username;
-		char       *dbname;
+// FIXME:
 
-		username = get_username();  /* no need to free freed */
-		if (username)
-		{
-			pkt.user_length = strlen(username);
-			memcpy(pkt.meta, username, pkt.user_length);
-		}
+	//	const char *username;
+	//	char       *dbname;
 
-		dbname = get_database_name(MyDatabaseId); /* needs to be freed */
-		if (dbname)
-		{
-			pkt.db_length = strlen(dbname);
-			memcpy(pkt.meta+pkt.user_length, dbname, pkt.db_length);
-			pfree(dbname);
-		}
+	//	username = get_username();  /* no need to free freed */
+	//	if (username)
+	//	{
+	//		pkt.user_length = strlen(username);
+	//		memcpy(pkt.meta, username, pkt.user_length);
+	//	}
+
+	//	dbname = get_database_name(MyDatabaseId); /* needs to be freed */
+	//	if (dbname)
+	//	{
+	//		pkt.db_length = strlen(dbname);
+	//		memcpy(pkt.meta+pkt.user_length, dbname, pkt.db_length);
+	//		pfree(dbname);
+	//	}
 
 		SET_GPCC_CMDTYPE(pkt, qd->operation);
 		/*
