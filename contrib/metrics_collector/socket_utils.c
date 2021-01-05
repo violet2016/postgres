@@ -7,7 +7,6 @@
  *
  *-------------------------------------------------------------------------
  */
-#include "c.h"
 #include "socket_utils.h"
 #include "utils_pg.h"
 #include "time.h"
