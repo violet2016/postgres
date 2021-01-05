@@ -820,10 +820,10 @@ emit_query_info(QueryDesc *qd, QueryMetricsStatus status)
 		}*/
 	}
 
-	if (status == METRICS_QUERY_SUBMIT)
-		send_packet(&pkt, query_info_bytes_to_send(&pkt), pkt.qid.ssid & HASH_TO_BUCKET, MERGE_QUERY_INFO);
-	else
-		merge_qlog_packet(&pkt);
+	//if (status == METRICS_QUERY_SUBMIT)
+	send_packet(&pkt, query_info_bytes_to_send(&pkt), pkt.qid.ssid & HASH_TO_BUCKET, MERGE_NONE);
+	//else
+	//	merge_qlog_packet(&pkt);
 
 	if (status == METRICS_QUERY_SUBMIT)
 	{
