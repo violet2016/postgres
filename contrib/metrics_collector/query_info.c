@@ -726,10 +726,12 @@ emit_query_info(QueryDesc *qd, QueryMetricsStatus status)
 	pkt.version  = METRICS_PACKET_VERSION;
 	pkt.pkttype  = METRICS_PKTTYPE_QUERY;
 	pkt.qid.tmid = mc_gettmid();
+	//FIXME: now all tmid is 0
+	/*
 	if (pkt.qid.tmid == 0) {
 		//Skip internal queries
 		return;
-	}
+	}*/
 
 	pkt.enable_query_profiling = gpcc_enable_query_profiling;
 	pkt.qid.ssid = session_id;
