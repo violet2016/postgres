@@ -105,11 +105,11 @@ flushBuffContext_finishup(void);
 extern bool
 should_init_socket(void);
 
-extern int
+extern bool
 socket_init(void);
 
 extern int
-send_single_packet(void *p, size_t n);
+send_single_packet(void *p, size_t n, int bucket);
 
 extern void
 reset_conn(void);

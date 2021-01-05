@@ -18,8 +18,7 @@ static void
 packet_trace(void *p);
 #endif
 
-// FIXME: conn size?
-static metrics_conn conn[10] = {{-1}};
+static metrics_conn conn[NUM_PACKET_BUCKET] = {{-1}};
 
 #if defined(__linux__)
 	#define METRICS_NAME "/tmp/.s.GPMC.%d.sock"
@@ -64,7 +63,7 @@ bool
 socket_init(void)
 {
 	bool res = true;
-	for (int i = 0; i < 10; i++) {
+	for (int i = 0; i < NUM_PACKET_BUCKET; i++) {
 		int   sock;
 		close(conn[i].sock);
 		conn[i].sock = -1;
@@ -108,7 +107,7 @@ socket_init(void)
 void
 reset_conn(void)
 {
-	for (int i = 0; i < 10; i++) {
+	for (int i = 0; i < NUM_PACKET_BUCKET; i++) {
 		close(conn[i].sock);
 		conn[i].sock = -1;
 		memset(&conn[i].addr, 0, sizeof(conn[i].addr));
@@ -134,7 +133,7 @@ try_add_to_packet_buffer(void *p, size_t n, int bucket, int save_merge)
 	if (n > SINGLE_PACKET_SIZE_LIMIT)
 	{
 		// Protection code for handling XLarge packet
-		send_single_packet(p, n);
+		send_single_packet(p, n, bucket);
 		return 0;
 	}
 
@@ -270,7 +269,7 @@ send_packet(void *p, size_t n, int bucket, int save_merge)
 	flushBuff->len     = bytes_to_send;
 
 	//elog(LOG, "Metrics collector: RUSH BATCH PACKET %d", bytes_to_send);
-	send_single_packet(flushBuff, bytes_to_send + sizeof(batch_packet_header));
+	send_single_packet(flushBuff, bytes_to_send + sizeof(batch_packet_header), bucket);
 	pfree(flushBuff);
 	flushBuff = NULL;
 
@@ -279,12 +278,11 @@ send_packet(void *p, size_t n, int bucket, int save_merge)
 }
  
 int
-send_single_packet(void *p, size_t n)
+send_single_packet(void *p, size_t n, int bucket)
 {
 	if (should_init_socket())
 		socket_init();
-	int index = srand(time(0)) % 10;
-	metrics_conn* conn_chosed = &conn[index];
+	metrics_conn* conn_chosed = &conn[bucket];
 	if (conn_chosed->sock >= 0)
 	{
 #if defined(__linux__)

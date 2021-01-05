@@ -101,7 +101,7 @@ MetricsCollectorLoopFunc(void)
 	//}
 
 	if (should_init_socket())
-		pbuff->main_connected = (socket_init() >= 0);
+		pbuff->main_connected = socket_init();
 
 	// do nothing if agent not start
 	if (should_keep_silence())
@@ -262,7 +262,7 @@ BatchSendPackets(void)
 	for (i = 0; i < batches_to_send; i++)
 	{
 		//elog(LOG, "Metrics collector: SEND BATCH PACKET (%d/%d) %d", i+1, batches_to_send, send[i]->len);
-		pbuff->main_connected = (send_single_packet(send[i], send[i]->len + sizeof(batch_packet_header)) >= 0);
+		pbuff->main_connected = (send_single_packet(send[i], send[i]->len + sizeof(batch_packet_header)) >= 0, current_bucket);
 	}
 
 	MemoryContextSwitchTo(oldcontext);
