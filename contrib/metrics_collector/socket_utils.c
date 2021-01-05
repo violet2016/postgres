@@ -7,16 +7,19 @@
  *
  *-------------------------------------------------------------------------
  */
-
+#include "c.h"
 #include "socket_utils.h"
 #include "utils_pg.h"
+#include "time.h"
 static int
 try_add_to_packet_buffer(void *p, size_t n, int bucket, int save_merge);
 #ifdef PACKET_TRACE
 static void
 packet_trace(void *p);
 #endif
-static metrics_conn conn = {-1};
+
+// FIXME: conn size?
+static metrics_conn conn[10] = {{-1}};
 
 #if defined(__linux__)
 	#define METRICS_NAME "/tmp/.s.GPMC.%d.sock"
@@ -46,61 +49,70 @@ int packet_buffer_size_red_line_actual = PACKET_BUFFER_RED_LINE;
 bool
 should_init_socket(void)
 {
+// FIXME: might have problem if the first sock init successfully but the others are not
 #if defined(__linux__)
-	if (conn.sock >= 0)
+	if (conn[0].sock >= 0)
 		return false;
 
 	return true;
 #else
-	return conn.sock < 0 || conn.addr.sin_port != htons(gpcc_query_metrics_port);
+	return conn[0].sock < 0 || conn[0].addr.sin_port != htons(gpcc_query_metrics_port);
 #endif
 }
 
-int
+bool
 socket_init(void)
 {
-	int   sock;
-	close(conn.sock);
-	conn.sock = -1;
-#if defined(__linux__)
-	struct sockaddr_un metrics_server;
-	sock = socket(AF_UNIX, SOCK_SEQPACKET, 0);
-	if (sock >= 0)
-	{
-		metrics_server.sun_family = AF_UNIX;
-		snprintf(metrics_server.sun_path, sizeof(metrics_server.sun_path),
-			METRICS_NAME, PostPortNumber);
-		if (connect(sock, (struct sockaddr *) &metrics_server, sizeof(struct sockaddr_un)))
+	bool res = true;
+	for (int i = 0; i < 10; i++) {
+		int   sock;
+		close(conn[i].sock);
+		conn[i].sock = -1;
+	#if defined(__linux__)
+		struct sockaddr_un metrics_server;
+		sock = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+		if (sock >= 0)
 		{
-			close(sock);
-			sock = -1;
-			// TODO packet loss action
+			metrics_server.sun_family = AF_UNIX;
+			snprintf(metrics_server.sun_path, sizeof(metrics_server.sun_path),
+				METRICS_NAME, PostPortNumber);
+			if (connect(sock, (struct sockaddr *) &metrics_server, sizeof(struct sockaddr_un)))
+			{
+				close(sock);
+				sock = -1;
+				res = false;
+				// TODO packet loss action
+			}
 		}
-	}
-#else
-	sock = socket(AF_INET, SOCK_DGRAM, 0);
-	if (sock == -1)
-		elog(WARNING, "Metrics collector: cannot create socket");
-	if (fcntl(sock, F_SETFL, O_NONBLOCK) == -1)
-		elog(WARNING, "Metrics collector: fcntl(F_SETFL, O_NONBLOCK) failed");
-	if (fcntl(sock, F_SETFD, 1) == -1)
-		elog(WARNING, "Metrics collector: fcntl(F_SETFD) failed");
-	memset(&conn.addr, 0, sizeof(conn.addr));
-	conn.addr.sin_family      = AF_INET;
-	conn.addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-	conn.addr.sin_port        = htons(gpcc_query_metrics_port);
-#endif
+	#else
+		sock = socket(AF_INET, SOCK_DGRAM, 0);
+		if (sock == -1) {
+			elog(WARNING, "Metrics collector: cannot create socket");
+			res = false;
+		}
+		if (fcntl(sock, F_SETFL, O_NONBLOCK) == -1)
+			elog(WARNING, "Metrics collector: fcntl(F_SETFL, O_NONBLOCK) failed");
+		if (fcntl(sock, F_SETFD, 1) == -1)
+			elog(WARNING, "Metrics collector: fcntl(F_SETFD) failed");
+		memset(&conn[i].addr, 0, sizeof(conn[i].addr));
+		conn[i].addr.sin_family      = AF_INET;
+		conn[i].addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+		conn[i].addr.sin_port        = htons(gpcc_query_metrics_port);
+	#endif
 
-	conn.sock = sock;
-	return sock;
+		conn[i].sock = sock;
+	}
+	return res;
 }
 
 void
 reset_conn(void)
 {
-	close(conn.sock);
-	conn.sock = -1;
-	memset(&conn.addr, 0, sizeof(conn.addr));
+	for (int i = 0; i < 10; i++) {
+		close(conn[i].sock);
+		conn[i].sock = -1;
+		memset(&conn[i].addr, 0, sizeof(conn[i].addr));
+	}
 }
 
 static metrics_query_info *saved_query_info;
@@ -265,18 +277,19 @@ send_packet(void *p, size_t n, int bucket, int save_merge)
 	MemoryContextSwitchTo(oldcontext);
 	MemoryContextReset(flushBuffContext);
 }
-
+ 
 int
 send_single_packet(void *p, size_t n)
 {
 	if (should_init_socket())
 		socket_init();
-
-	if (conn.sock >= 0)
+	int index = srand(time(0)) % 10;
+	metrics_conn* conn_chosed = &conn[index];
+	if (conn_chosed->sock >= 0)
 	{
 #if defined(__linux__)
 		int retry = 0;
-		while (n != write(conn.sock, p, n))
+		while (n != write(conn_chosed->sock, p, n))
 		{
 			if (errno == EINTR)
 			{
@@ -322,7 +335,7 @@ send_single_packet(void *p, size_t n)
 			//elog(LOG, "Metrics collector: cannot send packet, error %d %d", errno, retry);
 
 			socket_init();
-			if (conn.sock >= 0)
+			if (conn_chosed->sock >= 0)
 			{
 				//elog(LOG, "Metrics collector: BATCH: socket_init OK %d", conn.sock);
 				continue;
@@ -338,11 +351,11 @@ send_single_packet(void *p, size_t n)
 			}
 		}
 #else // defined(__linux__)
-		int send = sendto(conn.sock, p, n, 0,
-		                  (struct sockaddr *) &conn.addr, sizeof(conn.addr));
+		int send = sendto(conn_chosed->sock, p, n, 0,
+		                  (struct sockaddr *) &conn_chosed->addr, sizeof(conn_chosed->addr));
 		if (n != send) {
 			int err = errno;
-			elog(WARNING, "Metrics collector: cannot send packet, (socket %d) (err %d) (Expect %ld, Send %d)", conn.sock, err, n, send);
+			elog(WARNING, "Metrics collector: cannot send packet, (socket %d) (err %d) (Expect %ld, Send %d)", conn_chosed->sock, err, n, send);
 		}
 #ifdef PACKET_TRACE
 		else
@@ -350,7 +363,7 @@ send_single_packet(void *p, size_t n)
 #endif // PACKET_TRACE
 #endif // defined(__linux__)
 	}
-	return conn.sock;
+	return conn_chosed->sock;
 }
 
 #ifdef PACKET_TRACE
