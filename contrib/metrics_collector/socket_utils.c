@@ -75,7 +75,7 @@ socket_init(void)
 		{
 			metrics_server.sun_family = AF_UNIX;
 			snprintf(metrics_server.sun_path, sizeof(metrics_server.sun_path),
-				METRICS_NAME, PostPortNumber);
+				METRICS_NAME, i);
 			if (connect(sock, (struct sockaddr *) &metrics_server, sizeof(struct sockaddr_un)))
 			{
 				close(sock);
