@@ -20,7 +20,7 @@ packet_trace(void *p);
 static metrics_conn conn[NUM_PACKET_BUCKET] = {{-1}};
 
 #if defined(__linux__)
-	#define METRICS_NAME "/tmp/.s.GPMC.%d.sock"
+	#define METRICS_NAME "/tmp/.s.GPMC.%d.%d.sock"
 #else
 	#define METRICS_SERVER_NAME "/tmp/.s.GPMC.server.sock"
 	#define METRICS_CLIENT_NAME "/tmp/.s.GPMC.client.sock"
@@ -73,7 +73,8 @@ socket_init(void)
 		{
 			metrics_server.sun_family = AF_UNIX;
 			snprintf(metrics_server.sun_path, sizeof(metrics_server.sun_path),
-				METRICS_NAME, i);
+				METRICS_NAME, PostPortNumber, i);
+			elog(INFO, "try to connect %s", metrics_server.sun_path);
 			if (connect(sock, (struct sockaddr *) &metrics_server, sizeof(struct sockaddr_un)))
 			{
 				close(sock);
